@@ -23,7 +23,7 @@ async def client_connected(reader: StreamReader, writer: StreamWriter):
 
 
 async def main():
-    config: AppConfig = load_config("config.yaml")
+    config: AppConfig = load_config("../config.yaml")
     setup_logging(config.logging.level)
     host, port = config.listen.split(":")
     port = int(port)
