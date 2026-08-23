@@ -4,6 +4,11 @@ import sys
 
 from asyncio import StreamReader, StreamWriter
 from config import AppConfig, load_config
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+CONFIG_PATH = BASE_DIR / "config.yaml"
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +28,7 @@ async def client_connected(reader: StreamReader, writer: StreamWriter):
 
 
 async def main():
-    config: AppConfig = load_config("../config.yaml")
+    config: AppConfig = load_config(CONFIG_PATH)
     setup_logging(config.logging.level)
     host, port = config.listen.split(":")
     port = int(port)
