@@ -1,0 +1,25 @@
+# Виртуальное окружение
+.venv/
+venv/
+ENV/
+env/
+
+# Настройки IDE PyCharm
+.idea/
+
+# Настройки VS Code
+.vscode/
+
+# Кэш Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Логи и временные файлы
+*.log
+*.tmp
+
+# Системные файлы Windows и macOS
+Thumbs.db
+Desktop.ini
+.DS_Store
