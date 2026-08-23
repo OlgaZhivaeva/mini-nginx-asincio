@@ -1,16 +1,39 @@
-# This is a sample Python script.
+import asyncio
+import logging
+import sys
 
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+from asyncio import StreamReader, StreamWriter
+from config import AppConfig, load_config
+
+logger = logging.getLogger(__name__)
 
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
+def setup_logging(level_name: str):
+    log_level = getattr(logging, level_name.upper(), logging.INFO)
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
 
 
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    print_hi('PyCharm')
+async def client_connected(reader: StreamReader, writer: StreamWriter):
+    peer = writer.get_extra_info("peername")
+    logger.info(f"Пришел запрос от {peer[0]}:{peer[1]}")
 
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+
+async def main():
+    config: AppConfig = load_config("config.yaml")
+    setup_logging(config.logging.level)
+    host, port = config.listen.split(":")
+    port = int(port)
+
+    srv = await asyncio.start_server(client_connected, host, port)
+    logger.info(f"Мини-Nginx запущен на {host}:{port}")
+
+    async with srv:
+        await srv.serve_forever()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
