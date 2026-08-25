@@ -2,11 +2,9 @@ import asyncio
 import logging
 import sys
 
-from asyncio import StreamReader, StreamWriter
-from config import AppConfig, load_config
 from pathlib import Path
 
-from utils.http_parser import parse_http_request
+from proxy.config import AppConfig, load_config
 from proxy.proxy_server import ProxyServer
 
 BASE_DIR = Path(__file__).resolve().parent.parent

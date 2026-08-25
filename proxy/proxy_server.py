@@ -3,7 +3,7 @@ import logging
 from asyncio import StreamReader, StreamWriter
 
 from proxy.config import AppConfig
-from proxy.utils.http_parser import parse_http_request
+from proxy.client_handler import ClientConnectionHandler
 
 logger = logging.getLogger(__name__)
 
@@ -16,32 +16,8 @@ class ProxyServer:
         self, client_reader: StreamReader, client_writer: StreamWriter
     ):
         """Обработка входящего клиента."""
-        peer = client_writer.get_extra_info("peername")
-        logger.info(f"Пришел запрос от {peer[0]}:{peer[1]}")
-
-        try:
-            request = await parse_http_request(reader=client_reader)
-
-            logger.info(
-                f'Метод: {request["method"]}, Путь: {request["path"]}, Версия: {request["version"]}'
-            )
-            logger.info(f'Заголовки: {request["headers"]}')
-
-            response = (
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: text/plain\r\n"
-                b"Content-Length: 2\r\n"
-                b"Connection: close\r\n\r\n"
-                b"OK"
-            )
-            client_writer.write(response)
-            await client_writer.drain()
-
-        except Exception as e:
-            logger.error(f"Ошибка при обработке запроса от {peer}: {e}")
-        finally:
-            client_writer.close()
-            await client_writer.wait_closed()
+        handler = ClientConnectionHandler(client_reader, client_writer, self.config)
+        await handler.handle_connection()
 
     async def run(self):
         """Запуск TCP-сервера."""
