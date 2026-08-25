@@ -19,7 +19,7 @@ async def parse_http_request(reader: StreamReader) -> dict:
         header_line = line.decode().strip()
         if ":" in header_line:
             key, value = header_line.split(":", 1)
-            headers[key] = value
+            headers[key.strip()] = value.strip()
 
     return {
         "method": method,
