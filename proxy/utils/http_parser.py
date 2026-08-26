@@ -1,8 +1,9 @@
+import asyncio
 from asyncio import StreamReader
 
 
-async def parse_http_request(reader: StreamReader) -> dict:
-    start_line = await reader.readline()
+async def parse_http_request(reader: StreamReader, timeout: float) -> dict:
+    start_line = await asyncio.wait_for(reader.readline(), timeout)
     if not start_line:
         raise ConnectionError("Клиент закрыл соединение.")
 
@@ -12,7 +13,7 @@ async def parse_http_request(reader: StreamReader) -> dict:
 
     headers = {}
     while True:
-        line = await reader.readline()
+        line = await asyncio.wait_for(reader.readline(), timeout=timeout)
         if not line or line == b"\r\n":
             break
 

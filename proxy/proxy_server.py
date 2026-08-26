@@ -17,7 +17,12 @@ class ProxyServer:
     ):
         """Обработка входящего клиента."""
         handler = ClientConnectionHandler(client_reader, client_writer, self.config)
-        await handler.handle_connection()
+        peer = client_writer.get_extra_info("peername")
+        timeout = self.config.timeouts.read_ms / 1000
+        try:
+            await asyncio.wait_for(handler.handle_connection(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"Общий таймаут обработки запроса для клиента {peer} превышен")
 
     async def run(self):
         """Запуск TCP-сервера."""
