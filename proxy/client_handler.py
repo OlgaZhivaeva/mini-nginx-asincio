@@ -5,6 +5,8 @@ from asyncio import StreamReader, StreamWriter
 from proxy.config import AppConfig, UpstreamConfig
 from proxy.utils.http_parser import parse_http_request
 
+CHUNK_SIZE = 8192
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,13 +21,13 @@ class ClientConnectionHandler:
         self.client_writer = client_writer
         self.config = config
         self.peer = client_writer.get_extra_info('peername')
+        self.response_started = False
         self.read_timeout = self.config.timeouts.read_ms / 1000
         self.connect_timeout = self.config.timeouts.connect_ms / 1000
         self.write_timeout = self.config.timeouts.write_ms / 1000
 
     async def _pipe(self, reader: StreamReader, writer: StreamWriter):
         """Перекачивает байты из reader в writer с соблюдением backpressure."""
-        CHUNK_SIZE = 8192
         while True:
             try:
                 chunk = await asyncio.wait_for(reader.read(CHUNK_SIZE), timeout=self.read_timeout)
@@ -43,6 +45,23 @@ class ClientConnectionHandler:
                 logger.warning(f"Таймаут записи при стриминге для {self.peer}")
                 raise
 
+            if not self.response_started:
+                self.response_started = True
+
+    async def _pipe_exact(self, reader: StreamReader, writer: StreamWriter, total_bytes: int):
+        """Перекачивает ровно total_bytes."""
+        remaining = total_bytes
+        while remaining > 0:
+            to_read = min(CHUNK_SIZE, remaining)
+            chunk = await reader.read(to_read)
+            if not chunk:
+                raise ConnectionError(
+                    "Клиент оборвал соединение до передачи полного тела запроса"
+                )
+            writer.write(chunk)
+            await writer.drain()
+            remaining -= len(chunk)
+
     async def _send_upstream_request(self, upstream_writer: StreamWriter, request: dict):
         """Формирует и отправляет полный HTTP-запрос (заголовки + тело) на апстрим."""
         start_line = (
@@ -51,6 +70,8 @@ class ClientConnectionHandler:
         upstream_writer.write(start_line)
 
         headers = request["headers"]
+        headers["Connection"] = "close"
+
         for key, value in headers.items():
             header_line = f"{key}: {value}\r\n".encode()
             upstream_writer.write(header_line)
@@ -64,8 +85,8 @@ class ClientConnectionHandler:
             raise
 
         content_length = int(headers.get("Content-Length", 0))
-        if content_length > 0 or request["method"] in ("POST", "PUT", "PATCH"):
-            await self._pipe(self.client_reader, upstream_writer)
+        if content_length > 0:
+            await self._pipe_exact(self.client_reader, upstream_writer, content_length)
 
         logger.info("Успешно отправили весь запрос на апстрим")
 
@@ -83,6 +104,7 @@ class ClientConnectionHandler:
             )
             logger.info(f'Заголовки: {request["headers"]}')
 
+            upstream_reader, upstream_writer = await asyncio.open_connection(upstream_host, upstream_port)
 
             upstream_reader, upstream_writer = await asyncio.wait_for(
                 asyncio.open_connection(upstream_host, upstream_port),
@@ -110,16 +132,16 @@ class ClientConnectionHandler:
 
         except Exception as e:
             logger.error(f"Ошибка при обработке запроса от {self.peer}: {e}", exc_info=True)
-            error_response = (
-                b"HTTP/1.1 502 Bad Gateway\r\n"
-                b"Content-Type: text/plain\r\n"
-                b"Content-Length: 15\r\n"
-                b"Connection: close\r\n\r\n"
-                b"502 Bad Gateway"
-            )
-            self.client_writer.write(error_response)
-            await self.client_writer.drain()
-
+            if not self.response_started:
+                error_response = (
+                    b"HTTP/1.1 502 Bad Gateway\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    b"Content-Length: 15\r\n"
+                    b"Connection: close\r\n\r\n"
+                    b"502 Bad Gateway"
+                )
+                self.client_writer.write(error_response)
+                await self.client_writer.drain()
         finally:
             if upstream_writer:
                 upstream_writer.close()

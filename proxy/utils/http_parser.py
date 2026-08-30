@@ -1,6 +1,7 @@
 import asyncio
 from asyncio import StreamReader
 
+VALID_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 
 async def parse_http_request(reader: StreamReader, timeout: float) -> dict:
     start_line = await asyncio.wait_for(reader.readline(), timeout)
@@ -9,13 +10,34 @@ async def parse_http_request(reader: StreamReader, timeout: float) -> dict:
 
     start_line = start_line.decode().strip()
     parts = start_line.split()
-    method, path, version = parts[0], parts[1], parts[2]
+
+    if len(parts) != 3:
+        raise ValueError(f"Некорректная стартовая строка: {start_line}")
+
+    method, path, version = parts
+
+    if method.upper() not in VALID_METHODS:
+        raise ValueError(f"Некорректный HTTP-метод: {method}")
+
+    if not (
+            path.startswith("/")
+            or path.startswith("http://")
+            or path.startswith("https://")
+            or path == "*"
+    ):
+        raise ValueError(f"Некорректный путь в HTTP-запросе: {path}")
+
+    if not version.startswith("HTTP/"):
+        raise ValueError(f"Некорректная версия HTTP: {version}")
 
     headers = {}
     while True:
-        line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-        if not line or line == b"\r\n":
+        line = await reader.readline()
+        if line == b"\r\n":
             break
+
+        if not line:
+            raise ConnectionError("Запрос оборван до завершения заголовков")
 
         header_line = line.decode().strip()
         if ":" in header_line:
