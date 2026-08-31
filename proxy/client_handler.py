@@ -53,13 +53,21 @@ class ClientConnectionHandler:
         remaining = total_bytes
         while remaining > 0:
             to_read = min(CHUNK_SIZE, remaining)
-            chunk = await reader.read(to_read)
+            try:
+                chunk = await asyncio.wait_for(reader.read(to_read), timeout=self.read_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(f"Таймаут чтения тела запроса для {self.peer}")
+                raise
             if not chunk:
                 raise ConnectionError(
                     "Клиент оборвал соединение до передачи полного тела запроса"
                 )
             writer.write(chunk)
-            await writer.drain()
+            try:
+                await asyncio.wait_for(writer.drain(), timeout=self.write_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(f"Таймаут записи тела запроса для {self.peer}")
+                raise
             remaining -= len(chunk)
 
     async def _send_upstream_request(self, upstream_writer: StreamWriter, request: dict):
@@ -103,8 +111,6 @@ class ClientConnectionHandler:
                 f'Метод: {request["method"]}, Путь: {request["path"]}, Версия: {request["version"]}'
             )
             logger.info(f'Заголовки: {request["headers"]}')
-
-            upstream_reader, upstream_writer = await asyncio.open_connection(upstream_host, upstream_port)
 
             upstream_reader, upstream_writer = await asyncio.wait_for(
                 asyncio.open_connection(upstream_host, upstream_port),

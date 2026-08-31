@@ -32,7 +32,7 @@ async def parse_http_request(reader: StreamReader, timeout: float) -> dict:
 
     headers = {}
     while True:
-        line = await reader.readline()
+        line = await asyncio.wait_for(reader.readline(), timeout=timeout)
         if line == b"\r\n":
             break
 
