@@ -56,8 +56,8 @@ class ClientConnectionHandler:
         ).encode()
         upstream_writer.write(start_line)
 
-        headers = request["headers"]
-        headers["Connection"] = "close"
+        headers = {key.lower(): value for key, value in request["headers"].items()}
+        headers["connection"] = "close"
 
         for key, value in headers.items():
             header_line = f"{key}: {value}\r\n".encode()
@@ -66,7 +66,7 @@ class ClientConnectionHandler:
         upstream_writer.write(b"\r\n")
         await upstream_writer.drain()
 
-        content_length = int(headers.get("Content-Length", 0))
+        content_length = int(headers.get("content-length", 0))
         if content_length > 0:
             await self._pipe_exact(self.client_reader, upstream_writer, content_length)
 
