@@ -49,6 +49,34 @@ class ClientConnectionHandler:
             await writer.drain()
             remaining -= len(chunk)
 
+    async def _pipe_chunked(self, reader: StreamReader, writer: StreamWriter):
+        """Перекачивает chunked-тело запроса от клиента к апстриму."""
+        while True:
+            line = await reader.readline()
+            if not line:
+                raise ConnectionError(
+                    "Соединение оборвано во время чтения chunked-тела"
+                )
+
+            writer.write(line)
+            await writer.drain()
+
+            hex_size = line.decode().split(";")[0].strip()
+            try:
+                chunk_size = int(hex_size, 16)
+            except ValueError:
+                raise ValueError(f"Некорректный размер чанка: {hex_size}")
+
+            if chunk_size == 0:
+                trailer = await reader.readline()
+                writer.write(trailer)
+                await writer.drain()
+                break
+
+            chunk_data = await reader.readexactly(chunk_size + 2)
+            writer.write(chunk_data)
+            await writer.drain()
+
     async def _send_upstream_request(self, upstream_writer: StreamWriter, request: dict):
         """Формирует и отправляет полный HTTP-запрос (заголовки + тело) на апстрим."""
         start_line = (
@@ -65,6 +93,10 @@ class ClientConnectionHandler:
 
         upstream_writer.write(b"\r\n")
         await upstream_writer.drain()
+
+        transfer_encoding = headers.get("transfer-encoding", "")
+        if transfer_encoding == "chunked":
+            await self._pipe_chunked(self.client_reader, upstream_writer)
 
         content_length = int(headers.get("content-length", 0))
         if content_length > 0:
