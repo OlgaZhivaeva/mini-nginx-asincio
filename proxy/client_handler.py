@@ -2,7 +2,8 @@ import asyncio
 import logging
 from asyncio import StreamReader, StreamWriter
 
-from proxy.config import AppConfig, UpstreamConfig
+from proxy.config import AppConfig
+from proxy.exceptions import HttpRequestError, UpstreamError
 from proxy.utils.http_parser import parse_http_request
 
 CHUNK_SIZE = 8192
@@ -23,6 +24,21 @@ class ClientConnectionHandler:
         self.peer = client_writer.get_extra_info('peername')
         self.response_started = False
 
+    async def _send_error(self, status_line: bytes, body: bytes):
+        """Вспомогательный метод для отправки HTTP-ошибок клиенту."""
+        if self.response_started:
+            return
+
+        response = (
+            status_line + b"\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"Connection: close\r\n\r\n"
+            + body
+        )
+        self.client_writer.write(response)
+        await self.client_writer.drain()
+
     async def _pipe(self, reader: StreamReader, writer: StreamWriter):
         """Перекачивает байты из reader в writer с соблюдением backpressure."""
         while True:
@@ -42,7 +58,7 @@ class ClientConnectionHandler:
             to_read = min(CHUNK_SIZE, remaining)
             chunk = await reader.read(to_read)
             if not chunk:
-                raise ConnectionError(
+                raise HttpRequestError(
                     "Клиент оборвал соединение до передачи полного тела запроса"
                 )
             writer.write(chunk)
@@ -54,7 +70,7 @@ class ClientConnectionHandler:
         while True:
             line = await reader.readline()
             if not line:
-                raise ConnectionError(
+                raise HttpRequestError(
                     "Соединение оборвано во время чтения chunked-тела"
                 )
 
@@ -65,7 +81,7 @@ class ClientConnectionHandler:
             try:
                 chunk_size = int(hex_size, 16)
             except ValueError:
-                raise ValueError(f"Некорректный размер чанка: {hex_size}")
+                raise HttpRequestError(f"Некорректный размер чанка: {hex_size}")
 
             if chunk_size == 0:
                 trailer = await reader.readline()
@@ -118,25 +134,34 @@ class ClientConnectionHandler:
             )
             logger.info(f'Заголовки: {request["headers"]}')
 
-            upstream_reader, upstream_writer = await asyncio.open_connection(upstream_host, upstream_port)
-            logger.info(f"Подключились к апстриму {upstream_host}:{upstream_port}")
+            try:
+                upstream_reader, upstream_writer = await asyncio.open_connection(upstream_host, upstream_port)
+                logger.info(f"Подключились к апстриму {upstream_host}:{upstream_port}")
+            except OSError as e:
+                raise UpstreamError(f"Ошибка подключения к апстриму: {e}")
 
             await self._send_upstream_request(upstream_writer=upstream_writer, request=request)
 
             await self._pipe(upstream_reader, self.client_writer)
 
+        except asyncio.TimeoutError:
+            logger.warning(f"Таймаут операции для {self.peer}")
+            await self._send_error(b"HTTP/1.1 504 Gateway Timeout", b"504 Gateway Timeout")
+
+        except HttpRequestError as e:
+            logger.warning(f"Ошибка в запросе клиента {self.peer}: {e}")
+            await self._send_error(b"HTTP/1.1 400 Bad Request", b"400 Bad Request")
+
+        except UpstreamError as e:
+            logger.error(f"Ошибка апстрима для {self.peer}: {e}")
+            await self._send_error(b"HTTP/1.1 502 Bad Gateway", b"502 Bad Gateway")
+
         except Exception as e:
-            logger.error(f"Ошибка при обработке запроса от {self.peer}: {e}", exc_info=True)
-            if not self.response_started:
-                error_response = (
-                    b"HTTP/1.1 502 Bad Gateway\r\n"
-                    b"Content-Type: text/plain\r\n"
-                    b"Content-Length: 15\r\n"
-                    b"Connection: close\r\n\r\n"
-                    b"502 Bad Gateway"
-                )
-                self.client_writer.write(error_response)
-                await self.client_writer.drain()
+            logger.error(f"Непредвиденная ошибка для {self.peer}: {e}", exc_info=True)
+            await self._send_error(
+                b"HTTP/1.1 500 Internal Server Error", b"500 Internal Server Error"
+            )
+
         finally:
             if upstream_writer:
                 upstream_writer.close()
