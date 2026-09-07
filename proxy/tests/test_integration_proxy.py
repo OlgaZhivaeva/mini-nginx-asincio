@@ -34,15 +34,34 @@ class MockClientWriter:
         return ("127.0.0.1", 54321)
 
 
-def create_test_config(upstream_port: int) -> AppConfig:
+def create_test_config(
+    upstream_port: int = 9999,
+    upstream_host: str = "127.0.0.1",
+    upstreams: list = None,
+    connect_ms: int = 3000,
+    read_ms: int = 1000,
+    write_ms: int = 1000,
+    total_ms: int = 5000,
+    max_client_conns: int = 100,
+    max_conns_per_upstream: int = 10,
+) -> AppConfig:
     """Создает тестовый конфиг."""
+    if upstreams is None:
+        upstreams = [UpstreamConfig(host=upstream_host, port=upstream_port)]
+
     return AppConfig(
         listen="127.0.0.1:8080",
-        upstreams=[UpstreamConfig(host="127.0.0.1", port=upstream_port)],
+        upstreams=upstreams,
         timeouts=TimeoutConfig(
-            connect_ms=1000, read_ms=1000, write_ms=1000, total_ms=2000
+            connect_ms=connect_ms,
+            read_ms=read_ms,
+            write_ms=write_ms,
+            total_ms=total_ms,
         ),
-        limits=LimitConfig(max_client_conns=100, max_conns_per_upstream=10),
+        limits=LimitConfig(
+            max_client_conns=max_client_conns,
+            max_conns_per_upstream=max_conns_per_upstream,
+        ),
         logging=LoggingConfig(level="info"),
     )
 
@@ -222,3 +241,73 @@ async def test_broken_client_request_returns_400(unused_tcp_port):
 
     assert b"400 Bad Request" in response
     assert b"502 Bad Gateway" not in response
+
+
+@pytest.mark.asyncio
+async def test_client_read_timeout_returns_408():
+    """Тест: Медленный клиент (зависли заголовки) приводит к 408 Request Timeout."""
+    config = create_test_config(read_ms=100)
+    response = await run_proxy(
+        b"GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\n", config
+    )
+
+    assert b"408 Request Timeout" in response
+
+
+@pytest.mark.asyncio
+async def test_upstream_connect_timeout_returns_504():
+    """Тест: Таймаут подключения к апстриму (возвращает 504 Gateway Timeout)."""
+    config = create_test_config(
+        upstream_host="10.255.255.1", upstream_port=80, connect_ms=100
+    )
+    response = await run_proxy(
+        b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", config
+    )
+
+    assert b"504 Gateway Timeout" in response
+
+
+@pytest.mark.asyncio
+async def test_no_504_after_response_started(unused_tcp_port):
+    """Тест: Если ответ апстрима уже начался, при таймауте 504 Gateway Timeout не отправляется."""
+    config = create_test_config(unused_tcp_port, read_ms=100)
+
+    async def partial_upstream(reader, writer):
+        await reader.readline()
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nPart1")
+        await writer.drain()
+
+        await asyncio.sleep(0.5)
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(partial_upstream, "127.0.0.1", unused_tcp_port)
+
+    async with server:
+        response = await run_proxy(
+            b"GET /slow HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", config
+        )
+
+        assert b"200 OK" in response
+        assert b"Part1" in response
+        assert b"504 Gateway Timeout" not in response
+
+
+@pytest.mark.asyncio
+async def test_slow_upstream_returns_504(unused_tcp_port):
+    """Тест: Медленный апстрим вызывает 504 Gateway Timeout."""
+    config = create_test_config(unused_tcp_port, read_ms=100)
+
+    async def slow_upstream(reader, writer):
+        await reader.readline()
+        await asyncio.sleep(0.5)
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(slow_upstream, "127.0.0.1", unused_tcp_port)
+
+    async with server:
+        response = await run_proxy(
+            b"GET /slow HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", config
+        )
+        assert b"504 Gateway Timeout" in response
