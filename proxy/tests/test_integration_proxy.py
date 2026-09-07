@@ -8,7 +8,7 @@ from proxy.config import (
     LimitConfig,
     LoggingConfig,
 )
-from proxy.client_handler import ClientConnectionHandler
+from proxy.proxy_server import ProxyServer
 
 
 class MockClientWriter:
@@ -72,8 +72,9 @@ async def run_proxy(client_data: bytes, config: AppConfig) -> bytes:
     client_reader.feed_data(client_data)
     client_writer = MockClientWriter()
 
-    handler = ClientConnectionHandler(client_reader, client_writer, config)
-    await handler.handle_connection()
+    server = ProxyServer(config)
+    await server.handle_client(client_reader, client_writer)
+
     return bytes(client_writer.buffer)
 
 
@@ -311,3 +312,61 @@ async def test_slow_upstream_returns_504(unused_tcp_port):
             b"GET /slow HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", config
         )
         assert b"504 Gateway Timeout" in response
+
+
+@pytest.mark.asyncio
+async def test_exceed_total_timeout_returns_504(unused_tcp_port):
+    """Тест: Превышение общего таймаута вызывает 504 Gateway Timeout."""
+    config = create_test_config(unused_tcp_port, total_ms=100)
+    async def exceed_total_timeout(reader, writer):
+
+        while True:
+            line = await reader.readline()
+            await asyncio.sleep(0.8)
+            if line == b"\r\n":
+                break
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nHello Upstream"
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(exceed_total_timeout, "127.0.0.1", unused_tcp_port)
+
+    async with server:
+
+        response = await run_proxy(
+            b"GET /slow HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", config
+        )
+        assert b"504 Gateway Timeout" in response
+
+
+@pytest.mark.asyncio
+async def test_chunk_payload_timeout_returns_408(unused_tcp_port):
+    """Тест: Если клиент прислал размер чанка, но задержал payload, возвращается 408 Request Timeout."""
+    config = create_test_config(unused_tcp_port, read_ms=100)
+
+    async def handle_upstream(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(
+        handle_upstream, "127.0.0.1", unused_tcp_port
+    )
+
+    async with server:
+        incomplete_chunked_data = (
+            b"POST /upload HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"5\r\n"
+        )
+        response = await run_proxy(incomplete_chunked_data, config)
+
+        assert b"408 Request Timeout" in response

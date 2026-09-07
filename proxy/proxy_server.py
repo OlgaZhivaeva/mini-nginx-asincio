@@ -17,12 +17,14 @@ class ProxyServer:
     ):
         """Обработка входящего клиента."""
         handler = ClientConnectionHandler(client_reader, client_writer, self.config)
-        peer = client_writer.get_extra_info("peername")
-        timeout = self.config.timeouts.read_ms / 1000
+        handler.peer = client_writer.get_extra_info("peername")
+
         try:
-            await asyncio.wait_for(handler.handle_connection(), timeout=timeout)
+            await asyncio.wait_for(handler.handle_connection(), timeout=handler.total_timeout)
         except asyncio.TimeoutError:
-            logger.warning(f"Общий таймаут обработки запроса для клиента {peer} превышен")
+            if not handler.response_started:
+                logger.warning(f"Превышен общий таймаут обработки запроса для клиента {handler.peer}")
+                await handler.send_error(b"HTTP/1.1 504 Gateway Timeout", b"504 Gateway Timeout")
 
     async def run(self):
         """Запуск TCP-сервера."""

@@ -36,8 +36,9 @@ class ClientConnectionHandler:
         self.read_timeout = self.config.timeouts.read_ms / 1000
         self.connect_timeout = self.config.timeouts.connect_ms / 1000
         self.write_timeout = self.config.timeouts.write_ms / 1000
+        self.total_timeout = self.config.timeouts.total_ms / 1000
 
-    async def _send_error(self, status_line: bytes, body: bytes):
+    async def send_error(self, status_line: bytes, body: bytes):
         """Вспомогательный метод для отправки HTTP-ошибок клиенту."""
         if self.response_started:
             return
@@ -130,7 +131,7 @@ class ClientConnectionHandler:
             try:
                 chunk_data = await asyncio.wait_for(reader.readexactly(chunk_size + 2), timeout=self.read_timeout)
             except asyncio.TimeoutError:
-                raise UpstreamWriteTimeoutError("Таймаут чтения данных чанка от клиента")
+                raise ClientReadTimeoutError("Таймаут чтения данных чанка от клиента")
 
             writer.write(chunk_data)
             try:
@@ -204,35 +205,42 @@ class ClientConnectionHandler:
 
         except ClientReadTimeoutError as e:
             logger.warning(f"Таймаут чтения от клиента {self.peer}: {e}")
-            await self._send_error(b"HTTP/1.1 408 Request Timeout", b"408 Request Timeout")
+            await self.send_error(b"HTTP/1.1 408 Request Timeout", b"408 Request Timeout")
 
         except UpstreamTimeoutError as e:
             logger.warning(f"Таймаут апстрима для {self.peer}: {e}")
-            await self._send_error(b"HTTP/1.1 504 Gateway Timeout", b"504 Gateway Timeout")
+            await self.send_error(b"HTTP/1.1 504 Gateway Timeout", b"504 Gateway Timeout")
 
         except ClientWriteTimeoutError as e:
             logger.warning(f"Таймаут записи ответа клиенту {self.peer}: {e}")
 
         except HttpRequestError as e:
             logger.warning(f"Ошибка в запросе клиента {self.peer}: {e}")
-            await self._send_error(b"HTTP/1.1 400 Bad Request", b"400 Bad Request")
+            await self.send_error(b"HTTP/1.1 400 Bad Request", b"400 Bad Request")
 
         except UpstreamError as e:
             logger.error(f"Ошибка апстрима для {self.peer}: {e}")
-            await self._send_error(b"HTTP/1.1 502 Bad Gateway", b"502 Bad Gateway")
+            await self.send_error(b"HTTP/1.1 502 Bad Gateway", b"502 Bad Gateway")
 
         except Exception as e:
             logger.error(f"Непредвиденная ошибка для {self.peer}: {e}", exc_info=True)
-            await self._send_error(
+            await self.send_error(
                 b"HTTP/1.1 500 Internal Server Error", b"500 Internal Server Error"
             )
 
         finally:
             if upstream_writer:
-                upstream_writer.close()
-                await upstream_writer.wait_closed()
-                logger.info(f"Соединение с апстримом {upstream_host}:{upstream_port} закрыто")
+                try:
+                    upstream_writer.close()
+                    await upstream_writer.wait_closed()
+                    logger.info(f"Соединение с апстримом {upstream_host}:{upstream_port} закрыто")
+                except OSError as e:
+                    logger.debug(f"Ошибка при закрытии сокета апстрима: {e}")
 
-            self.client_writer.close()
-            await self.client_writer.wait_closed()
-            logger.info(f"Соединение с клиентом {self.peer[0]}:{self.peer[1]} закрыто")
+            try:
+                self.client_writer.close()
+                await self.client_writer.wait_closed()
+                logger.info(f"Соединение с клиентом {self.peer[0]}:{self.peer[1]} закрыто")
+            except OSError as e:
+                logger.debug(f"Ошибка при закрытии сокета клиента: {e}")
+
