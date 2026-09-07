@@ -40,7 +40,7 @@ async def test_early_eof_on_start_line():
     """Тест на ранний EOF (клиент сразу закрыл соединение)."""
     reader = DummyReader(b"")
     with pytest.raises(HttpRequestError, match="Клиент закрыл соединение"):
-        await parse_http_request(reader)
+        await parse_http_request(reader, timeout=5.0)
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,16 @@ import logging
 from asyncio import StreamReader, StreamWriter
 
 from proxy.config import AppConfig
-from proxy.exceptions import HttpRequestError, UpstreamError
+from proxy.exceptions import (
+    ClientReadTimeoutError,
+    ClientWriteTimeoutError,
+    HttpRequestError,
+    UpstreamConnectTimeoutError,
+    UpstreamError,
+    UpstreamTimeoutError,
+    UpstreamReadTimeoutError,
+    UpstreamWriteTimeoutError,
+)
 from proxy.utils.http_parser import parse_http_request
 
 CHUNK_SIZE = 8192
@@ -23,6 +32,7 @@ class ClientConnectionHandler:
         self.config = config
         self.peer = client_writer.get_extra_info('peername')
         self.response_started = False
+
         self.read_timeout = self.config.timeouts.read_ms / 1000
         self.connect_timeout = self.config.timeouts.connect_ms / 1000
         self.write_timeout = self.config.timeouts.write_ms / 1000
@@ -48,21 +58,17 @@ class ClientConnectionHandler:
             try:
                 chunk = await asyncio.wait_for(reader.read(CHUNK_SIZE), timeout=self.read_timeout)
             except asyncio.TimeoutError:
-                logger.warning(f"Таймаут чтения при стриминге для {self.peer}")
-                raise
+                raise UpstreamReadTimeoutError("Апстрим слишком долго передавал ответ")
 
             if not chunk:
                 break
             writer.write(chunk)
+            self.response_started = True
 
             try:
                 await asyncio.wait_for(writer.drain(), timeout=self.write_timeout)
             except asyncio.TimeoutError:
-                logger.warning(f"Таймаут записи при стриминге для {self.peer}")
-                raise
-
-            if not self.response_started:
-                self.response_started = True
+                raise ClientWriteTimeoutError("Таймаут записи ответа клиенту")
 
     async def _pipe_exact(self, reader: StreamReader, writer: StreamWriter, total_bytes: int):
         """Перекачивает ровно total_bytes."""
@@ -72,8 +78,8 @@ class ClientConnectionHandler:
             try:
                 chunk = await asyncio.wait_for(reader.read(to_read), timeout=self.read_timeout)
             except asyncio.TimeoutError:
-                logger.warning(f"Таймаут чтения тела запроса для {self.peer}")
-                raise
+                raise ClientReadTimeoutError("Клиент слишком долго передавал тело запроса")
+
             if not chunk:
                 raise HttpRequestError(
                     "Клиент оборвал соединение до передачи полного тела запроса"
@@ -82,21 +88,26 @@ class ClientConnectionHandler:
             try:
                 await asyncio.wait_for(writer.drain(), timeout=self.write_timeout)
             except asyncio.TimeoutError:
-                logger.warning(f"Таймаут записи тела запроса для {self.peer}")
-                raise
+                raise UpstreamWriteTimeoutError("Таймаут записи тела на апстрим")
             remaining -= len(chunk)
 
     async def _pipe_chunked(self, reader: StreamReader, writer: StreamWriter):
         """Перекачивает chunked-тело запроса от клиента к апстриму."""
         while True:
-            line = await reader.readline()
+            try:
+                line = await asyncio.wait_for(reader.readline(), timeout=self.read_timeout)
+            except asyncio.TimeoutError:
+                raise ClientReadTimeoutError("Таймаут чтения chunked-строки клиента")
             if not line:
                 raise HttpRequestError(
                     "Соединение оборвано во время чтения chunked-тела"
                 )
 
             writer.write(line)
-            await writer.drain()
+            try:
+                await asyncio.wait_for(writer.drain(), timeout=self.write_timeout)
+            except asyncio.TimeoutError:
+                raise UpstreamWriteTimeoutError("Таймаут записи чанка на апстрим")
 
             hex_size = line.decode().split(";")[0].strip()
             try:
@@ -105,14 +116,27 @@ class ClientConnectionHandler:
                 raise HttpRequestError(f"Некорректный размер чанка: {hex_size}")
 
             if chunk_size == 0:
-                trailer = await reader.readline()
+                try:
+                    trailer = await asyncio.wait_for(reader.readline(), timeout=self.read_timeout)
+                except asyncio.TimeoutError:
+                    raise ClientReadTimeoutError("Таймаут чтения трейлера от клиента")
                 writer.write(trailer)
-                await writer.drain()
+                try:
+                    await asyncio.wait_for(writer.drain(), timeout=self.write_timeout)
+                except asyncio.TimeoutError:
+                    raise UpstreamWriteTimeoutError("Таймаут записи трейлера на апстрим")
                 break
 
-            chunk_data = await reader.readexactly(chunk_size + 2)
+            try:
+                chunk_data = await asyncio.wait_for(reader.readexactly(chunk_size + 2), timeout=self.read_timeout)
+            except asyncio.TimeoutError:
+                raise UpstreamWriteTimeoutError("Таймаут чтения данных чанка от клиента")
+
             writer.write(chunk_data)
-            await writer.drain()
+            try:
+                await asyncio.wait_for(writer.drain(), timeout=self.write_timeout)
+            except asyncio.TimeoutError:
+                raise UpstreamWriteTimeoutError("Таймаут записи данных чанка на апстрим")
 
     async def _send_upstream_request(self, upstream_writer: StreamWriter, request: dict):
         """Формирует и отправляет полный HTTP-запрос (заголовки + тело) на апстрим."""
@@ -133,15 +157,14 @@ class ClientConnectionHandler:
         try:
             await asyncio.wait_for(upstream_writer.drain(), timeout=self.write_timeout)
         except asyncio.TimeoutError:
-            logger.warning(f"Таймаут записи на апстрим для {self.peer}")
-            raise
+            raise UpstreamWriteTimeoutError("Таймаут записи заголовков на апстрим")
 
         transfer_encoding = headers.get("transfer-encoding", "")
-        if transfer_encoding == "chunked":
-            await self._pipe_chunked(self.client_reader, upstream_writer)
-
         content_length = int(headers.get("content-length", 0))
-        if content_length > 0:
+
+        if "chunked" in transfer_encoding:
+            await self._pipe_chunked(self.client_reader, upstream_writer)
+        elif content_length > 0:
             await self._pipe_exact(self.client_reader, upstream_writer, content_length)
 
         logger.info("Успешно отправили весь запрос на апстрим")
@@ -153,7 +176,10 @@ class ClientConnectionHandler:
         upstream_port = self.config.upstreams[0].port
 
         try:
-            request = await parse_http_request(reader=self.client_reader, timeout=self.read_timeout)
+            try:
+                request = await parse_http_request(reader=self.client_reader, timeout=self.read_timeout)
+            except asyncio.TimeoutError:
+                raise ClientReadTimeoutError("Клиент медленно передаёт заголовки")
 
             logger.info(
                 f'Метод: {request["method"]}, Путь: {request["path"]}, Версия: {request["version"]}'
@@ -161,8 +187,14 @@ class ClientConnectionHandler:
             logger.info(f'Заголовки: {request["headers"]}')
 
             try:
-                upstream_reader, upstream_writer = await asyncio.open_connection(upstream_host, upstream_port)
+                upstream_reader, upstream_writer = await asyncio.wait_for(
+                    asyncio.open_connection(upstream_host, upstream_port),
+                    timeout=self.connect_timeout,
+                )
                 logger.info(f"Подключились к апстриму {upstream_host}:{upstream_port}")
+            except asyncio.TimeoutError:
+                raise UpstreamConnectTimeoutError("Таймаут подключения к апстриму")
+
             except OSError as e:
                 raise UpstreamError(f"Ошибка подключения к апстриму: {e}")
 
@@ -170,9 +202,16 @@ class ClientConnectionHandler:
 
             await self._pipe(upstream_reader, self.client_writer)
 
-        except asyncio.TimeoutError:
-            logger.warning(f"Таймаут операции для {self.peer}")
+        except ClientReadTimeoutError as e:
+            logger.warning(f"Таймаут чтения от клиента {self.peer}: {e}")
+            await self._send_error(b"HTTP/1.1 408 Request Timeout", b"408 Request Timeout")
+
+        except UpstreamTimeoutError as e:
+            logger.warning(f"Таймаут апстрима для {self.peer}: {e}")
             await self._send_error(b"HTTP/1.1 504 Gateway Timeout", b"504 Gateway Timeout")
+
+        except ClientWriteTimeoutError as e:
+            logger.warning(f"Таймаут записи ответа клиенту {self.peer}: {e}")
 
         except HttpRequestError as e:
             logger.warning(f"Ошибка в запросе клиента {self.peer}: {e}")
