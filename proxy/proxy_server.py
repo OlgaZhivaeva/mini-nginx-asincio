@@ -17,7 +17,6 @@ class ProxyServer:
     ):
         """Обработка входящего клиента."""
         handler = ClientConnectionHandler(client_reader, client_writer, self.config)
-        handler.peer = client_writer.get_extra_info("peername")
 
         try:
             await asyncio.wait_for(handler.handle_connection(), timeout=handler.total_timeout)
