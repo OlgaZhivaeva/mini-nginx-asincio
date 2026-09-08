@@ -1,5 +1,6 @@
 import asyncio
 import pytest
+from proxy.exceptions import HttpRequestError
 from proxy.utils.http_parser import parse_http_request
 
 
@@ -38,7 +39,7 @@ async def test_parse_valid_request():
 async def test_early_eof_on_start_line():
     """Тест на ранний EOF (клиент сразу закрыл соединение)."""
     reader = DummyReader(b"")
-    with pytest.raises(ConnectionError, match="Клиент закрыл соединение"):
+    with pytest.raises(HttpRequestError, match="Клиент закрыл соединение"):
         await parse_http_request(reader, timeout=5.0)
 
 
@@ -50,7 +51,7 @@ async def test_early_eof_during_headers():
         b"Host: example.test\r\n"
     )
     reader = DummyReader(raw_data)
-    with pytest.raises(ConnectionError, match="Запрос оборван до завершения заголовков"):
+    with pytest.raises(HttpRequestError, match="Запрос оборван до завершения заголовков"):
         await parse_http_request(reader, timeout=5.0)
 
 
@@ -58,7 +59,7 @@ async def test_early_eof_during_headers():
 async def test_invalid_start_line_format():
     """Тест на некорректную стартовую строку (не 3 элемента)."""
     reader = DummyReader(b"GET /example.com/hello/name\r\n\r\n")
-    with pytest.raises(ValueError, match="Некорректная стартовая строка"):
+    with pytest.raises(HttpRequestError, match="Некорректная стартовая строка"):
         await parse_http_request(reader, timeout=5.0)
 
 
@@ -66,7 +67,7 @@ async def test_invalid_start_line_format():
 async def test_invalid_http_method():
     """Тест на недопустимый HTTP-метод."""
     reader = DummyReader(b"INVALID /example.com/hello/name HTTP/1.1\r\n\r\n")
-    with pytest.raises(ValueError, match="Некорректный HTTP-метод"):
+    with pytest.raises(HttpRequestError, match="Некорректный HTTP-метод"):
         await parse_http_request(reader, timeout=5.0)
 
 
@@ -74,7 +75,7 @@ async def test_invalid_http_method():
 async def test_invalid_path():
     """Тест на некорректный путь (не начинается с /)."""
     reader = DummyReader(b"GET example.com/hello/name HTTP/1.1\r\n\r\n")
-    with pytest.raises(ValueError, match="Некорректный путь"):
+    with pytest.raises(HttpRequestError, match="Некорректный путь"):
         await parse_http_request(reader, timeout=5.0)
 
 
@@ -82,5 +83,5 @@ async def test_invalid_path():
 async def test_invalid_http_version():
     """Тест на некорректную версию HTTP."""
     reader = DummyReader(b"GET /example.com/hello/name/hello FOO/1.0\r\n\r\n")
-    with pytest.raises(ValueError, match="Некорректная версия HTTP"):
+    with pytest.raises(HttpRequestError, match="Некорректная версия HTTP"):
         await parse_http_request(reader, timeout=5.0)
