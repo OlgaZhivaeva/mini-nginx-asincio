@@ -146,7 +146,7 @@ class ClientConnectionHandler:
         ).encode()
         upstream_writer.write(start_line)
 
-        headers = {key.lower(): value for key, value in request["headers"].items()}
+        headers = request["headers"]
         headers["connection"] = "close"
 
         for key, value in headers.items():
@@ -160,13 +160,10 @@ class ClientConnectionHandler:
         except asyncio.TimeoutError:
             raise UpstreamWriteTimeoutError("Таймаут записи заголовков на апстрим")
 
-        transfer_encoding = headers.get("transfer-encoding", "")
-        content_length = int(headers.get("content-length", 0))
-
-        if "chunked" in transfer_encoding:
+        if request["transfer_encoding"] == "chunked":
             await self._pipe_chunked(self.client_reader, upstream_writer)
-        elif content_length > 0:
-            await self._pipe_exact(self.client_reader, upstream_writer, content_length)
+        elif request["content_length"] > 0:
+            await self._pipe_exact(self.client_reader, upstream_writer, request["content_length"])
 
         logger.info("Успешно отправили весь запрос на апстрим")
 
