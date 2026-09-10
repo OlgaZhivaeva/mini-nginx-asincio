@@ -248,10 +248,3 @@ class ClientConnectionHandler:
                     logger.info(f"Соединение с апстримом {upstream_host}:{upstream_port} закрыто")
                 except OSError as e:
                     logger.debug(f"Ошибка при закрытии сокета апстрима: {e}")
-
-            try:
-                self.client_writer.close()
-                await self.client_writer.wait_closed()
-                logger.info(f"Соединение с клиентом {self.peer[0]}:{self.peer[1]} закрыто")
-            except OSError as e:
-                logger.debug(f"Ошибка при закрытии сокета клиента: {e}")

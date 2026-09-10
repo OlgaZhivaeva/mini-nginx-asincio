@@ -37,6 +37,7 @@ class MockClientWriter:
 def create_test_config(
     upstream_port: int = 9999,
     upstream_host: str = "127.0.0.1",
+    proxy_port: int = 8080,
     upstreams: list = None,
     connect_ms: int = 3000,
     read_ms: int = 1000,
@@ -50,7 +51,7 @@ def create_test_config(
         upstreams = [UpstreamConfig(host=upstream_host, port=upstream_port)]
 
     return AppConfig(
-        listen="127.0.0.1:8080",
+        listen=f"127.0.0.1:{proxy_port}",
         upstreams=upstreams,
         timeouts=TimeoutConfig(
             connect_ms=connect_ms,
@@ -480,3 +481,45 @@ async def test_chunk_missing_crlf_returns_400(unused_tcp_port):
         )
         response = await run_proxy(broken_chunk, config)
         assert b"400 Bad Request" in response
+
+
+@pytest.mark.asyncio
+async def test_real_tcp_total_timeout_returns_504(unused_tcp_port_factory):
+    """Интеграционный тест с реальным TCP-клиентом:
+    проверяет, что при total_timeout клиент получает 504 до закрытия сокета.
+    """
+    proxy_port = unused_tcp_port_factory()
+    upstream_port = unused_tcp_port_factory()
+
+    config = create_test_config(
+        upstream_port=upstream_port, proxy_port=proxy_port, total_ms=200
+    )
+
+    async def slow_upstream(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+        await asyncio.sleep(1.0)
+        writer.close()
+        await writer.wait_closed()
+
+    upstream_srv = await asyncio.start_server(
+        slow_upstream, "127.0.0.1", upstream_port
+    )
+    proxy = ProxyServer(config)
+    proxy_srv = await asyncio.start_server(
+        proxy.handle_client, "127.0.0.1", proxy_port
+    )
+
+    async with upstream_srv, proxy_srv:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(b"GET /timeout HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        await writer.drain()
+
+        response = await reader.read(4096)
+
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"HTTP/1.1 504 Gateway Timeout" in response
