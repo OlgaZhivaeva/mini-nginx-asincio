@@ -17,7 +17,26 @@ class ProxyServer:
     ):
         """Обработка входящего клиента."""
         handler = ClientConnectionHandler(client_reader, client_writer, self.config)
-        await handler.handle_connection()
+
+        try:
+            await asyncio.wait_for(handler.handle_connection(), timeout=handler.total_timeout)
+        except asyncio.TimeoutError:
+            if not handler.response_started:
+                logger.warning(f"Превышен общий таймаут обработки запроса для клиента {handler.peer}")
+                await handler.send_error(b"HTTP/1.1 504 Gateway Timeout", b"504 Gateway Timeout")
+        except Exception as e:
+            logger.error(f"Непредвиденная ошибка при обработке клиента {handler.peer}: {e}", exc_info=True)
+            if not handler.response_started:
+                await handler.send_error(
+                    b"HTTP/1.1 500 Internal Server Error", b"500 Internal Server Error"
+                )
+        finally:
+            try:
+                client_writer.close()
+                await client_writer.wait_closed()
+                logger.info(f"Соединение с клиентом {handler.peer} закрыто")
+            except OSError:
+                pass
 
     async def run(self):
         """Запуск TCP-сервера."""
