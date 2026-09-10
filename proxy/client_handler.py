@@ -55,6 +55,7 @@ class ClientConnectionHandler:
 
     async def _pipe(self, reader: StreamReader, writer: StreamWriter):
         """Перекачивает байты из reader в writer с соблюдением backpressure."""
+        first_read = True
         while True:
             try:
                 chunk = await asyncio.wait_for(reader.read(CHUNK_SIZE), timeout=self.read_timeout)
@@ -62,7 +63,11 @@ class ClientConnectionHandler:
                 raise UpstreamReadTimeoutError("Апстрим слишком долго передавал ответ")
 
             if not chunk:
+                if first_read:
+                    raise UpstreamError("Апстрим закрыл соединение без ответа (ранний EOF)")
                 break
+
+            first_read = False
             writer.write(chunk)
             self.response_started = True
 
@@ -117,21 +122,31 @@ class ClientConnectionHandler:
                 raise HttpRequestError(f"Некорректный размер чанка: {hex_size}")
 
             if chunk_size == 0:
-                try:
-                    trailer = await asyncio.wait_for(reader.readline(), timeout=self.read_timeout)
-                except asyncio.TimeoutError:
-                    raise ClientReadTimeoutError("Таймаут чтения трейлера от клиента")
-                writer.write(trailer)
-                try:
-                    await asyncio.wait_for(writer.drain(), timeout=self.write_timeout)
-                except asyncio.TimeoutError:
-                    raise UpstreamWriteTimeoutError("Таймаут записи трейлера на апстрим")
+                while True:
+                    try:
+                        trailer = await asyncio.wait_for(reader.readline(), timeout=self.read_timeout)
+                    except asyncio.TimeoutError:
+                        raise ClientReadTimeoutError("Таймаут чтения трейлера от клиента")
+                    writer.write(trailer)
+                    try:
+                        await asyncio.wait_for(writer.drain(), timeout=self.write_timeout)
+                    except asyncio.TimeoutError:
+                        raise UpstreamWriteTimeoutError("Таймаут записи трейлера на апстрим")
+
+                    if trailer == b"\r\n":
+                        break
+
                 break
 
             try:
                 chunk_data = await asyncio.wait_for(reader.readexactly(chunk_size + 2), timeout=self.read_timeout)
             except asyncio.TimeoutError:
                 raise ClientReadTimeoutError("Таймаут чтения данных чанка от клиента")
+            except (asyncio.IncompleteReadError, ConnectionResetError):
+                raise HttpRequestError("Клиент закрыл соединение до передачи полного чанка")
+
+            if not chunk_data.endswith(b"\r\n"):
+                raise HttpRequestError("Чанк должен завершаться последовательностью CRLF")
 
             writer.write(chunk_data)
             try:
@@ -240,4 +255,3 @@ class ClientConnectionHandler:
                 logger.info(f"Соединение с клиентом {self.peer[0]}:{self.peer[1]} закрыто")
             except OSError as e:
                 logger.debug(f"Ошибка при закрытии сокета клиента: {e}")
-
