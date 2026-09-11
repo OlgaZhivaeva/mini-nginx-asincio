@@ -37,6 +37,7 @@ class MockClientWriter:
 def create_test_config(
     upstream_port: int = 9999,
     upstream_host: str = "127.0.0.1",
+    proxy_port: int = 8080,
     upstreams: list = None,
     connect_ms: int = 3000,
     read_ms: int = 1000,
@@ -50,7 +51,7 @@ def create_test_config(
         upstreams = [UpstreamConfig(host=upstream_host, port=upstream_port)]
 
     return AppConfig(
-        listen="127.0.0.1:8080",
+        listen=f"127.0.0.1:{proxy_port}",
         upstreams=upstreams,
         timeouts=TimeoutConfig(
             connect_ms=connect_ms,
@@ -370,3 +371,155 @@ async def test_chunk_payload_timeout_returns_408(unused_tcp_port):
         response = await run_proxy(incomplete_chunked_data, config)
 
         assert b"408 Request Timeout" in response
+
+
+@pytest.mark.asyncio
+async def test_conflict_te_and_cl_returns_400():
+    """Тест: Конфликт Transfer-Encoding и Content-Length возвращает 400 Bad Request."""
+    config = create_test_config()
+    bad_request = (
+        b"POST /upload HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"Content-Length: 5\r\n\r\n"
+        b"5\r\nHello\r\n0\r\n\r\n"
+    )
+    response = await run_proxy(bad_request, config)
+    assert b"400 Bad Request" in response
+
+
+@pytest.mark.asyncio
+async def test_invalid_content_length_returns_400():
+    """Тест: Нечисловой Content-Length возвращает 400 Bad Request вместо 500."""
+    config = create_test_config()
+    bad_request = (
+        b"POST /upload HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Length: nope\r\n\r\n"
+    )
+    response = await run_proxy(bad_request, config)
+    assert b"400 Bad Request" in response
+
+
+@pytest.mark.asyncio
+async def test_chunked_with_trailers(unused_tcp_port):
+    """Тест: Chunked запрос с несколькими trailer-полями корректно дочитывается до конца."""
+    config = create_test_config(unused_tcp_port)
+    received_data = b""
+
+    async def handle_upstream(reader, writer):
+        nonlocal received_data
+        while True:
+            line = await reader.readline()
+            received_data += line
+
+            if line == b"\r\n" and b"0\r\n" in received_data:
+                break
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_upstream, "127.0.0.1", unused_tcp_port)
+
+    async with server:
+        chunked_with_trailers = (
+            b"POST /upload HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            b"5\r\nHello\r\n"
+            b"0\r\n"
+            b"Expires: Wed, 21 Oct 2026 07:28:00 GMT\r\n"
+            b"X-Checksum: abc123xyz\r\n"
+            b"\r\n"
+        )
+        response = await run_proxy(chunked_with_trailers, config)
+
+        assert b"200 OK" in response
+        assert b"Expires: Wed, 21 Oct 2026" in received_data
+        assert b"X-Checksum: abc123xyz" in received_data
+
+
+@pytest.mark.asyncio
+async def test_early_eof_from_upstream_returns_502(unused_tcp_port):
+    """Тест: Ранний EOF от апстрима (закрыл сокет без ответа) возвращает 502 Bad Gateway."""
+    config = create_test_config(unused_tcp_port)
+
+    async def silent_close_upstream(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(silent_close_upstream, "127.0.0.1", unused_tcp_port)
+
+    async with server:
+        response = await run_proxy(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", config)
+        assert b"502 Bad Gateway" in response
+
+
+@pytest.mark.asyncio
+async def test_chunk_missing_crlf_returns_400(unused_tcp_port):
+    """Тест: Чанк с нарушенным форматом (нет CRLF на конце) возвращает 400 Bad Request."""
+    config = create_test_config(unused_tcp_port)
+
+    async def handle_upstream(reader, writer):
+        await reader.readline()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_upstream, "127.0.0.1", unused_tcp_port)
+
+    async with server:
+        broken_chunk = (
+            b"POST /upload HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            b"5\r\nHelloXX0\r\n\r\n"
+        )
+        response = await run_proxy(broken_chunk, config)
+        assert b"400 Bad Request" in response
+
+
+@pytest.mark.asyncio
+async def test_real_tcp_total_timeout_returns_504(unused_tcp_port_factory):
+    """Интеграционный тест с реальным TCP-клиентом:
+    проверяет, что при total_timeout клиент получает 504 до закрытия сокета.
+    """
+    proxy_port = unused_tcp_port_factory()
+    upstream_port = unused_tcp_port_factory()
+
+    config = create_test_config(
+        upstream_port=upstream_port, proxy_port=proxy_port, total_ms=200
+    )
+
+    async def slow_upstream(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+        await asyncio.sleep(1.0)
+        writer.close()
+        await writer.wait_closed()
+
+    upstream_srv = await asyncio.start_server(
+        slow_upstream, "127.0.0.1", upstream_port
+    )
+    proxy = ProxyServer(config)
+    proxy_srv = await asyncio.start_server(
+        proxy.handle_client, "127.0.0.1", proxy_port
+    )
+
+    async with upstream_srv, proxy_srv:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(b"GET /timeout HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        await writer.drain()
+
+        response = await reader.read(4096)
+
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"HTTP/1.1 504 Gateway Timeout" in response
