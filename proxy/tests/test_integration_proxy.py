@@ -523,3 +523,100 @@ async def test_real_tcp_total_timeout_returns_504(unused_tcp_port_factory):
         await writer.wait_closed()
 
         assert b"HTTP/1.1 504 Gateway Timeout" in response
+
+
+@pytest.mark.asyncio
+async def test_round_robin_distribution(unused_tcp_port_factory):
+    """Тест: запросы поочередно распределяются между двумя разными бэкендами."""
+    port1 = unused_tcp_port_factory()
+    port2 = unused_tcp_port_factory()
+
+    upstreams = [
+        UpstreamConfig(host="127.0.0.1", port=port1),
+        UpstreamConfig(host="127.0.0.1", port=port2),
+    ]
+    config = create_test_config(upstreams=upstreams)
+
+    async def handle_backend_1(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nBackend 1")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def handle_backend_2(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nBackend 2")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server1 = await asyncio.start_server(handle_backend_1, "127.0.0.1", port1)
+    server2 = await asyncio.start_server(handle_backend_2, "127.0.0.1", port2)
+
+    async with server1, server2:
+        proxy_server = ProxyServer(config)
+
+        async def send_request():
+            client_reader = asyncio.StreamReader()
+            client_reader.feed_data(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            client_writer = MockClientWriter()
+            await proxy_server.handle_client(client_reader, client_writer)
+            return bytes(client_writer.buffer)
+
+        resp1 = await send_request()
+        assert b"Backend 1" in resp1
+
+        resp2 = await send_request()
+        assert b"Backend 2" in resp2
+
+        resp3 = await send_request()
+        assert b"Backend 1" in resp3
+
+
+@pytest.mark.asyncio
+async def test_round_robin_one_backend_fails(unused_tcp_port_factory):
+    """Тест: если один бэкенд выключен, запрос к нему возвращает 502, а к живому — 200."""
+    dead_port = unused_tcp_port_factory()
+    alive_port = unused_tcp_port_factory()
+
+    upstreams = [
+        UpstreamConfig(host="127.0.0.1", port=dead_port),
+        UpstreamConfig(host="127.0.0.1", port=alive_port),
+    ]
+    config = create_test_config(upstreams=upstreams)
+
+    async def handle_alive_backend(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nAlive")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    alive_server = await asyncio.start_server(handle_alive_backend, "127.0.0.1", alive_port)
+
+    async with alive_server:
+        proxy_server = ProxyServer(config)
+
+        async def send_request():
+            client_reader = asyncio.StreamReader()
+            client_reader.feed_data(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            client_writer = MockClientWriter()
+            await proxy_server.handle_client(client_reader, client_writer)
+            return bytes(client_writer.buffer)
+
+        resp1 = await send_request()
+        assert b"502 Bad Gateway" in resp1
+
+        resp2 = await send_request()
+        assert b"200 OK" in resp2
+        assert b"Alive" in resp2

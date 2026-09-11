@@ -13,6 +13,7 @@ from proxy.exceptions import (
     UpstreamReadTimeoutError,
     UpstreamWriteTimeoutError,
 )
+from proxy.upstream_pool import UpstreamPool
 from proxy.utils.http_parser import parse_http_request
 
 CHUNK_SIZE = 8192
@@ -25,11 +26,13 @@ class ClientConnectionHandler:
             self,
             client_reader: StreamReader,
             client_writer: StreamWriter,
-            config: AppConfig
+            config: AppConfig,
+            upstream_pool: UpstreamPool
     ):
         self.client_reader = client_reader
         self.client_writer = client_writer
         self.config = config
+        self.upstream_pool = upstream_pool
         self.peer = client_writer.get_extra_info('peername')
         self.response_started = False
 
@@ -185,8 +188,9 @@ class ClientConnectionHandler:
     async def handle_connection(self):
         logger.info(f"Пришел запрос от {self.peer[0]}:{self.peer[1]}")
         upstream_writer = None
-        upstream_host = self.config.upstreams[0].host
-        upstream_port = self.config.upstreams[0].port
+        upstream = self.upstream_pool.get_next_upstream()
+        upstream_host = str(upstream.host)
+        upstream_port = upstream.port
 
         try:
             try:
