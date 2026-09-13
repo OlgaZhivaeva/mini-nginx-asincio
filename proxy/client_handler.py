@@ -218,6 +218,9 @@ class ClientConnectionHandler:
                     )
                     logger.info(f"Подключились к апстриму {upstream_host}:{upstream_port}")
 
+                    logger.info(f"Cокет апстрима (откуда/куда): {upstream_writer.get_extra_info('sockname')} -> {upstream_writer.get_extra_info('peername')}")
+                    logger.info(f"Cокет клиента  (куда/откуда): {self.client_writer.get_extra_info('sockname')} <- {self.client_writer.get_extra_info('peername')}")
+
                 except asyncio.TimeoutError:
                     raise UpstreamConnectTimeoutError("Таймаут подключения к апстриму")
 
