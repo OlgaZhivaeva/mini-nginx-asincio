@@ -111,9 +111,9 @@ pytest
 В разных терминалах запустите два экземпляра эхо-сервера
 
 ```bash
-python -m uvicorn echo_app:app --host 127.0.0.1 --port 9001
+python -m uvicorn proxy.tests.echo_app:app --host 127.0.0.1 --port 9001
 
-python -m uvicorn echo_app:app --host 127.0.0.1 --port 9002
+python -m uvicorn proxy.tests.echo_app:app --host 127.0.0.1 --port 9002
 ```
 
 ### Запуск прокси сервера
