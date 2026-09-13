@@ -113,3 +113,16 @@ async def test_parse_invalid_content_length():
     reader = DummyReader(raw_data)
     with pytest.raises(HttpRequestError, match="Некорректное значение Content-Length"):
         await parse_http_request(reader, timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_parse_chunked_not_last_raises_400():
+    """Тест: если chunked не последний в Transfer-Encoding, парсер выдает HttpRequestError."""
+    raw_data = (
+        b"POST /api HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Transfer-Encoding: chunked, gzip\r\n\r\n"
+    )
+    reader = DummyReader(raw_data)
+    with pytest.raises(HttpRequestError, match="обязан быть последним"):
+        await parse_http_request(reader, timeout=5.0)

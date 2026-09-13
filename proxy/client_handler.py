@@ -127,6 +127,12 @@ class ClientConnectionHandler:
                         trailer = await asyncio.wait_for(reader.readline(), timeout=self.read_timeout)
                     except asyncio.TimeoutError:
                         raise ClientReadTimeoutError("Таймаут чтения трейлера от клиента")
+
+                    if not trailer:
+                        raise HttpRequestError(
+                            "Клиент оборвал соединение до завершения chunked trailers"
+                        )
+
                     writer.write(trailer)
                     try:
                         await asyncio.wait_for(writer.drain(), timeout=self.write_timeout)

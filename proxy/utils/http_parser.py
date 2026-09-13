@@ -66,14 +66,21 @@ async def parse_http_request(reader: StreamReader, timeout: float) -> dict:
                 headers[key] = value
 
     transfer_encoding = headers.get("transfer-encoding", "").lower()
-    has_chunked = "chunked" in [te.strip() for te in transfer_encoding.split(",") if te.strip()]
-    has_cl = "content-length" in headers
-    content_length = 0
+    te_tokens = [te.strip() for te in transfer_encoding.split(",") if te.strip()]
+    has_chunked = "chunked" in te_tokens
+    has_content_length = "content-length" in headers
 
-    if has_chunked and has_cl:
+    if te_tokens and has_content_length:
         raise HttpRequestError("Одновременное использование Transfer-Encoding и Content-Length запрещено")
 
-    if has_cl:
+    if te_tokens and te_tokens[-1] != "chunked":
+        raise HttpRequestError(
+            "Transfer-Encoding: chunked обязан быть последним кодированием в списке"
+        )
+
+    content_length = 0
+
+    if has_content_length:
         cl_value = headers["content-length"]
         if not cl_value.isdigit():
             raise HttpRequestError(f"Некорректное значение Content-Length: {cl_value}")
