@@ -4,6 +4,7 @@ from asyncio import StreamReader, StreamWriter
 
 from proxy.config import AppConfig
 from proxy.client_handler import ClientConnectionHandler
+from proxy.upstream_pool import UpstreamPool
 
 logger = logging.getLogger(__name__)
 
@@ -11,13 +12,18 @@ logger = logging.getLogger(__name__)
 class ProxyServer:
     def __init__(self, config: AppConfig):
         self.config = config
+        self.upstream_pool = UpstreamPool(config.upstreams)
 
     async def handle_client(
         self, client_reader: StreamReader, client_writer: StreamWriter
     ):
         """Обработка входящего клиента."""
-        handler = ClientConnectionHandler(client_reader, client_writer, self.config)
-
+        handler = ClientConnectionHandler(
+            client_reader,
+            client_writer,
+            self.config,
+            self.upstream_pool,
+        )
         try:
             await asyncio.wait_for(handler.handle_connection(), timeout=handler.total_timeout)
         except asyncio.TimeoutError:
