@@ -158,7 +158,7 @@ sudo apt-get install k6
 
 Для Windows (через Chocolatey)
 ```bash
-choco install k6  # Для Windows (через Chocolatey)
+choco install k6
 ```
 
 Убедитесь, что запущены оба бэкенда (`uvicorn`) и прокси-сервер (`main.py`).
@@ -166,7 +166,7 @@ choco install k6  # Для Windows (через Chocolatey)
 Запустите скрипт нагрузки из корня проекта:
 
 ```bash
- k6 run proxy.tests.load_test.js
+ k6 run proxy\tests\load_test.js  # для Windows
 ```
 
 ### Пример результатов тестирования:
