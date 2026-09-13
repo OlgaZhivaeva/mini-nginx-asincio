@@ -66,7 +66,13 @@ async def parse_http_request(reader: StreamReader, timeout: float) -> dict:
                 headers[key] = value
 
     transfer_encoding = headers.get("transfer-encoding", "").lower()
-    has_chunked = "chunked" in [te.strip() for te in transfer_encoding.split(",") if te.strip()]
+    te_tokens = [te.strip() for te in transfer_encoding.split(",") if te.strip()]
+    has_chunked = "chunked" in te_tokens
+    if has_chunked and te_tokens[-1] != "chunked":
+        raise HttpRequestError(
+            "Transfer-Encoding: chunked обязан быть последним кодированием в списке"
+        )
+
     has_cl = "content-length" in headers
     content_length = 0
 
