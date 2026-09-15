@@ -57,8 +57,8 @@ mini_nginx_on_asyncio/
 Склонируйте репозиторий. Создайте и активируйте виртуальное окружение.
 
 ```bash
-git clone https://github.com/OlgaZhivaeva/mini-nginx--asincio.git
-cd mini_nginx_on_asyncio
+git clone https://github.com/OlgaZhivaeva/mini-nginx-asincio.git
+cd mini-nginx-on-asyncio
 python3 -m venv .venv
 ```
 Для Linux:
