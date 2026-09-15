@@ -655,3 +655,57 @@ async def test_round_robin_one_backend_fails(unused_tcp_port_factory):
         resp2 = await send_request()
         assert b"200 OK" in resp2
         assert b"Alive" in resp2
+
+
+@pytest.mark.asyncio
+async def test_total_timeout_includes_queue_waiting_time(unused_tcp_port_factory):
+    """
+    Тест: При max_client_conns=1 и total_ms=100 второй запрос падает по 504 примерно через 100 мс,
+    а не ждёт начала освобождения слота + полный новый таймаут.
+    """
+    proxy_port = unused_tcp_port_factory()
+    upstream_port = unused_tcp_port_factory()
+
+    config = create_test_config(
+        upstream_port=upstream_port,
+        proxy_port=proxy_port,
+        total_ms=100,
+        max_client_conns=1,
+    )
+
+    async def slow_upstream(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+        await asyncio.sleep(0.3)
+        writer.close()
+        await writer.wait_closed()
+
+    upstream_srv = await asyncio.start_server(slow_upstream, "127.0.0.1", upstream_port)
+    proxy = ProxyServer(config)
+    proxy_srv = await asyncio.start_server(proxy.handle_client, "127.0.0.1", proxy_port)
+
+    async with upstream_srv, proxy_srv:
+        reader1, writer1 = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer1.write(b"GET /req1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        await writer1.drain()
+
+        await asyncio.sleep(0.01)
+
+        start_time = asyncio.get_event_loop().time()
+
+        reader2, writer2 = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer2.write(b"GET /req2 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        await writer2.drain()
+
+        resp2 = await reader2.read(1024)
+        time_spent = asyncio.get_event_loop().time() - start_time
+
+        writer1.close()
+        await writer1.wait_closed()
+        writer2.close()
+        await writer2.wait_closed()
+
+        assert b"504 Gateway Timeout" in resp2
+        assert time_spent < 0.15
