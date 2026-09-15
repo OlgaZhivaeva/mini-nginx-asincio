@@ -1,0 +1,50 @@
+import asyncio
+import logging
+from asyncio import StreamReader, StreamWriter
+
+from proxy.config import AppConfig
+from proxy.client_handler import ClientConnectionHandler
+
+logger = logging.getLogger(__name__)
+
+
+class ProxyServer:
+    def __init__(self, config: AppConfig):
+        self.config = config
+
+    async def handle_client(
+        self, client_reader: StreamReader, client_writer: StreamWriter
+    ):
+        """Обработка входящего клиента."""
+        handler = ClientConnectionHandler(client_reader, client_writer, self.config)
+
+        try:
+            await asyncio.wait_for(handler.handle_connection(), timeout=handler.total_timeout)
+        except asyncio.TimeoutError:
+            if not handler.response_started:
+                logger.warning(f"Превышен общий таймаут обработки запроса для клиента {handler.peer}")
+                await handler.send_error(b"HTTP/1.1 504 Gateway Timeout", b"504 Gateway Timeout")
+        except Exception as e:
+            logger.error(f"Непредвиденная ошибка при обработке клиента {handler.peer}: {e}", exc_info=True)
+            if not handler.response_started:
+                await handler.send_error(
+                    b"HTTP/1.1 500 Internal Server Error", b"500 Internal Server Error"
+                )
+        finally:
+            try:
+                client_writer.close()
+                await client_writer.wait_closed()
+                logger.info(f"Соединение с клиентом {handler.peer} закрыто")
+            except OSError:
+                pass
+
+    async def run(self):
+        """Запуск TCP-сервера."""
+        host, port_str = self.config.listen.split(":")
+        port = int(port_str)
+
+        srv = await asyncio.start_server(self.handle_client, host, port)
+        logger.info(f"Мини-Nginx запущен на {host}:{port}")
+
+        async with srv:
+            await srv.serve_forever()
