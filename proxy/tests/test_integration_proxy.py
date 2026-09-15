@@ -484,6 +484,41 @@ async def test_chunk_missing_crlf_returns_400(unused_tcp_port):
 
 
 @pytest.mark.asyncio
+async def test_chunked_trailers_eof_returns_400(unused_tcp_port):
+    """Тест: если клиент закрыл соединение посреди trailers (EOF), возвращается 400 Bad Request."""
+    config = create_test_config(unused_tcp_port)
+
+    async def handle_upstream(reader, writer):
+        await reader.readline()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(
+        handle_upstream, "127.0.0.1", unused_tcp_port
+    )
+
+    async with server:
+        incomplete_trailers = (
+            b"POST /upload HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            b"0\r\n"
+            b"X-Incomplete-Trailer: foo\r\n"
+        )
+
+        client_reader = asyncio.StreamReader()
+        client_reader.feed_data(incomplete_trailers)
+        client_reader.feed_eof()
+
+        client_writer = MockClientWriter()
+        proxy_server = ProxyServer(config)
+        await proxy_server.handle_client(client_reader, client_writer)
+
+        response = bytes(client_writer.buffer)
+        assert b"400 Bad Request" in response
+
+
+@pytest.mark.asyncio
 async def test_real_tcp_total_timeout_returns_504(unused_tcp_port_factory):
     """Интеграционный тест с реальным TCP-клиентом:
     проверяет, что при total_timeout клиент получает 504 до закрытия сокета.

@@ -126,3 +126,4 @@ async def test_parse_chunked_not_last_raises_400():
     reader = DummyReader(raw_data)
     with pytest.raises(HttpRequestError, match="обязан быть последним"):
         await parse_http_request(reader, timeout=5.0)
+
