@@ -29,7 +29,7 @@
 ## Структура проекта
 
 ```text
-mini_nginx_on_asyncio/
+mini-nginx-asyncio/
 ├── proxy/
 │   ├── tests/
 │   │   ├── echo_app.py               # Тестовый бэкенд (Echo App)
