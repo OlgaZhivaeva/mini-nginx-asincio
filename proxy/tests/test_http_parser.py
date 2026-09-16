@@ -126,3 +126,30 @@ async def test_parse_chunked_not_last_raises_400():
     reader = DummyReader(raw_data)
     with pytest.raises(HttpRequestError, match="обязан быть последним"):
         await parse_http_request(reader, timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_parse_transfer_encoding_gzip_raises_400():
+    """Тест: Transfer-Encoding: gzip без Transfer-Encoding: cunked вызывает HttpRequestError."""
+    raw_data = (
+        b"POST /api HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Transfer-Encoding: gzip\r\n\r\n"
+    )
+    reader = DummyReader(raw_data)
+    with pytest.raises(HttpRequestError, match="обязан быть последним"):
+        await parse_http_request(reader, timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_parse_transfer_encoding_gzip_and_content_length_raises_400():
+    """Тест: одновременное наличие Transfer-Encoding: gzip и Content-Length вызывает HttpRequestError."""
+    raw_data = (
+        b"POST /api HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Transfer-Encoding: gzip\r\n"
+        b"Content-Length: 10\r\n\r\n"
+    )
+    reader = DummyReader(raw_data)
+    with pytest.raises(HttpRequestError, match="запрещено"):
+        await parse_http_request(reader, timeout=5.0)
