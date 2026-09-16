@@ -58,7 +58,7 @@ mini_nginx_on_asyncio/
 
 ```bash
 git clone https://github.com/OlgaZhivaeva/mini-nginx-asincio.git
-cd mini-nginx-on-asyncio
+cd mini-nginx-asyncio
 python3 -m venv .venv
 ```
 Для Linux:
