@@ -209,21 +209,27 @@ class ClientConnectionHandler:
             )
             logger.info(f'Заголовки: {request["headers"]}')
 
-            try:
-                upstream_reader, upstream_writer = await asyncio.wait_for(
-                    asyncio.open_connection(upstream_host, upstream_port),
-                    timeout=self.connect_timeout,
-                )
-                logger.info(f"Подключились к апстриму {upstream_host}:{upstream_port}")
-            except asyncio.TimeoutError:
-                raise UpstreamConnectTimeoutError("Таймаут подключения к апстриму")
+            upstream_sem = self.upstream_pool.get_semaphore(upstream)
+            async with upstream_sem:
+                try:
+                    upstream_reader, upstream_writer = await asyncio.wait_for(
+                        asyncio.open_connection(upstream_host, upstream_port),
+                        timeout=self.connect_timeout,
+                    )
+                    logger.info(f"Подключились к апстриму {upstream_host}:{upstream_port}")
 
-            except OSError as e:
-                raise UpstreamError(f"Ошибка подключения к апстриму: {e}")
+                    logger.info(f"Cокет апстрима (откуда/куда): {upstream_writer.get_extra_info('sockname')} -> {upstream_writer.get_extra_info('peername')}")
+                    logger.info(f"Cокет клиента  (куда/откуда): {self.client_writer.get_extra_info('sockname')} <- {self.client_writer.get_extra_info('peername')}")
 
-            await self._send_upstream_request(upstream_writer=upstream_writer, request=request)
+                except asyncio.TimeoutError:
+                    raise UpstreamConnectTimeoutError("Таймаут подключения к апстриму")
 
-            await self._pipe(upstream_reader, self.client_writer)
+                except OSError as e:
+                    raise UpstreamError(f"Ошибка подключения к апстриму: {e}")
+
+                await self._send_upstream_request(upstream_writer=upstream_writer, request=request)
+
+                await self._pipe(upstream_reader, self.client_writer)
 
         except ClientReadTimeoutError as e:
             logger.warning(f"Таймаут чтения от клиента {self.peer}: {e}")

@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 class ProxyServer:
     def __init__(self, config: AppConfig):
         self.config = config
-        self.upstream_pool = UpstreamPool(config.upstreams)
+        self.upstream_pool = UpstreamPool(config)
+        self.semaphore = asyncio.Semaphore(self.config.limits.max_client_conns)
 
     async def handle_client(
         self, client_reader: StreamReader, client_writer: StreamWriter
@@ -24,8 +25,14 @@ class ProxyServer:
             self.config,
             self.upstream_pool,
         )
+
+        async def _handle_connection_with_semaphore():
+            """Ожидает доступный слот семафора и запускает обработку соединения."""
+            async with self.semaphore:
+                await handler.handle_connection()
+
         try:
-            await asyncio.wait_for(handler.handle_connection(), timeout=handler.total_timeout)
+            await asyncio.wait_for(_handle_connection_with_semaphore(), timeout=handler.total_timeout)
         except asyncio.TimeoutError:
             if not handler.response_started:
                 logger.warning(f"Превышен общий таймаут обработки запроса для клиента {handler.peer}")
