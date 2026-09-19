@@ -709,3 +709,121 @@ async def test_total_timeout_includes_queue_waiting_time(unused_tcp_port_factory
 
         assert b"504 Gateway Timeout" in resp2
         assert time_spent < 0.15
+
+
+@pytest.mark.asyncio
+async def test_expect_100_continue_flow(unused_tcp_port_factory):
+    """Тест: клиент с Expect: 100-continue ждет 100 Continue, передает тело и получает 200 OK."""
+    proxy_port = unused_tcp_port_factory()
+    upstream_port = unused_tcp_port_factory()
+
+    config = create_test_config(
+        upstream_port=upstream_port,
+        proxy_port=proxy_port,
+    )
+
+    async def upstream_handler(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+
+        writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+        await writer.drain()
+
+        body = await reader.readexactly(5)
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    upstream_srv = await asyncio.start_server(
+        upstream_handler, "127.0.0.1", upstream_port
+    )
+    proxy = ProxyServer(config)
+    proxy_srv = await asyncio.start_server(
+        proxy.handle_client, "127.0.0.1", proxy_port
+    )
+
+    async with upstream_srv, proxy_srv:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+
+        headers = (
+            b"POST /upload HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Length: 5\r\n"
+            b"Expect: 100-continue\r\n\r\n"
+        )
+        writer.write(headers)
+        await writer.drain()
+
+        interim_line = await reader.readline()
+        assert b"100 Continue" in interim_line
+        await reader.readline()
+
+        writer.write(b"HELLO")
+        await writer.drain()
+
+        final_response = await reader.read(1024)
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"200 OK" in final_response
+        assert b"HELLO" in final_response
+
+
+@pytest.mark.asyncio
+async def test_expect_100_continue_upstream_rejection(unused_tcp_port_factory):
+    """Тест: апстрим отклоняет запрос с Expect: 100-continue статусом ошибки, тело не передается."""
+    proxy_port = unused_tcp_port_factory()
+    upstream_port = unused_tcp_port_factory()
+
+    config = create_test_config(
+        upstream_port=upstream_port,
+        proxy_port=proxy_port,
+    )
+
+    async def rejecting_upstream(reader, writer):
+        while True:
+            line = await reader.readline()
+            if line == b"\r\n" or not line:
+                break
+
+        writer.write(
+            b"HTTP/1.1 413 Payload Too Large\r\n"
+            b"Content-Length: 17\r\n"
+            b"Connection: close\r\n\r\n"
+            b"Payload Too Large"
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    upstream_srv = await asyncio.start_server(
+        rejecting_upstream, "127.0.0.1", upstream_port
+    )
+    proxy = ProxyServer(config)
+    proxy_srv = await asyncio.start_server(
+        proxy.handle_client, "127.0.0.1", proxy_port
+    )
+
+    async with upstream_srv, proxy_srv:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+
+        headers = (
+            b"POST /upload HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Length: 1000000\r\n"
+            b"Expect: 100-continue\r\n\r\n"
+        )
+        writer.write(headers)
+        await writer.drain()
+
+        response = await reader.read(1024)
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"413 Payload Too Large" in response
