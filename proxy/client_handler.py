@@ -190,41 +190,50 @@ class ClientConnectionHandler:
             raise UpstreamWriteTimeoutError("Таймаут записи заголовков на апстрим")
 
         if "100-continue" in headers.get("expect", "").lower():
-            try:
-                status_line = await asyncio.wait_for(upstream_reader.readline(), timeout=self.read_timeout)
-            except asyncio.TimeoutError:
-                raise UpstreamReadTimeoutError("Таймаут при ожидании 100-continue от апстрима")
-
-            if not status_line:
-                raise UpstreamError("Апстрим закрыл соединение до ответа на Expect: 100-continue")
-
-            interim_headers = []
             while True:
                 try:
-                    interim_line = await asyncio.wait_for(upstream_reader.readline(), timeout=self.read_timeout)
+                    status_line = await asyncio.wait_for(upstream_reader.readline(), timeout=self.read_timeout)
                 except asyncio.TimeoutError:
-                    raise UpstreamReadTimeoutError("Таймаут чтения промежуточных заголовков 100-continue")
+                    raise UpstreamReadTimeoutError("Таймаут при ожидании 100-continue от апстрима")
 
-                if not interim_line:
-                    raise UpstreamError("Апстрим оборвал соединение во время 100-continue")
+                if not status_line:
+                    raise UpstreamError("Апстрим закрыл соединение до ответа на Expect: 100-continue")
 
-                interim_headers.append(interim_line)
-                if interim_line == b"\r\n":
+                status_code = 0
+                parts = status_line.decode(errors="replace").split()
+                if len(parts) >= 2:
+                    if parts[1].isdigit():
+                        status_code = int(parts[1])
+
+                self.client_writer.write(status_line)
+
+                while True:
+                    try:
+                        interim_line = await asyncio.wait_for(upstream_reader.readline(), timeout=self.read_timeout)
+                    except asyncio.TimeoutError:
+                        raise UpstreamReadTimeoutError("Таймаут чтения промежуточных заголовков 100-continue")
+
+                    if not interim_line:
+                        raise UpstreamError("Апстрим оборвал соединение во время 1XX ответа")
+
+                    self.client_writer.write(interim_line)
+                    if interim_line == b"\r\n":
+                        break
+
+                try:
+                    await asyncio.wait_for(self.client_writer.drain(), timeout=self.write_timeout)
+                except asyncio.TimeoutError:
+                    raise ClientWriteTimeoutError("Таймаут отправки 1XX ответов клиенту")
+
+                if status_code == 100:
                     break
 
-            self.client_writer.write(status_line)
-            for header in interim_headers:
-                self.client_writer.write(header)
+                if 100 <= status_code < 200:
+                    continue
 
-            try:
-                await asyncio.wait_for(self.client_writer.drain(), timeout=self.write_timeout)
-            except asyncio.TimeoutError:
-                raise ClientWriteTimeoutError("Таймаут отправки 100 Continue клиенту")
-
-
-            if b"100" not in status_line:
-                self.response_started = True
-                return
+                if status_code >= 200:
+                    self.response_started = True
+                    return
 
 
         if request["transfer_encoding"] == "chunked":
