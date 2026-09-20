@@ -163,7 +163,12 @@ class ClientConnectionHandler:
             except asyncio.TimeoutError:
                 raise UpstreamWriteTimeoutError("Таймаут записи данных чанка на апстрим")
 
-    async def _send_upstream_request(self, upstream_writer: StreamWriter, request: dict):
+    async def _send_upstream_request(
+            self,
+            upstream_reader: StreamReader,
+            upstream_writer: StreamWriter,
+            request: dict,
+    ):
         """Формирует и отправляет полный HTTP-запрос (заголовки + тело) на апстрим."""
         start_line = (
             f"{request['method']} {request['path']} {request['version']}\r\n"
@@ -183,6 +188,53 @@ class ClientConnectionHandler:
             await asyncio.wait_for(upstream_writer.drain(), timeout=self.write_timeout)
         except asyncio.TimeoutError:
             raise UpstreamWriteTimeoutError("Таймаут записи заголовков на апстрим")
+
+        if "100-continue" in headers.get("expect", "").lower():
+            while True:
+                try:
+                    status_line = await asyncio.wait_for(upstream_reader.readline(), timeout=self.read_timeout)
+                except asyncio.TimeoutError:
+                    raise UpstreamReadTimeoutError("Таймаут при ожидании 100-continue от апстрима")
+
+                if not status_line:
+                    raise UpstreamError("Апстрим закрыл соединение до ответа на Expect: 100-continue")
+
+                status_code = 0
+                parts = status_line.decode(errors="replace").split()
+                if len(parts) >= 2:
+                    if parts[1].isdigit():
+                        status_code = int(parts[1])
+
+                self.client_writer.write(status_line)
+
+                while True:
+                    try:
+                        interim_line = await asyncio.wait_for(upstream_reader.readline(), timeout=self.read_timeout)
+                    except asyncio.TimeoutError:
+                        raise UpstreamReadTimeoutError("Таймаут чтения промежуточных заголовков 100-continue")
+
+                    if not interim_line:
+                        raise UpstreamError("Апстрим оборвал соединение во время 1XX ответа")
+
+                    self.client_writer.write(interim_line)
+                    if interim_line == b"\r\n":
+                        break
+
+                try:
+                    await asyncio.wait_for(self.client_writer.drain(), timeout=self.write_timeout)
+                except asyncio.TimeoutError:
+                    raise ClientWriteTimeoutError("Таймаут отправки 1XX ответов клиенту")
+
+                if status_code == 100:
+                    break
+
+                if 100 <= status_code < 200:
+                    continue
+
+                if status_code >= 200:
+                    self.response_started = True
+                    return
+
 
         if request["transfer_encoding"] == "chunked":
             await self._pipe_chunked(self.client_reader, upstream_writer)
@@ -227,7 +279,11 @@ class ClientConnectionHandler:
                 except OSError as e:
                     raise UpstreamError(f"Ошибка подключения к апстриму: {e}")
 
-                await self._send_upstream_request(upstream_writer=upstream_writer, request=request)
+                await self._send_upstream_request(
+                    upstream_reader=upstream_reader,
+                    upstream_writer=upstream_writer,
+                    request=request,
+                )
 
                 await self._pipe(upstream_reader, self.client_writer)
 
